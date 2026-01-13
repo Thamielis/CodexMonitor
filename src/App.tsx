@@ -7,6 +7,7 @@ import "./styles/home.css";
 import "./styles/main.css";
 import "./styles/messages.css";
 import "./styles/approval-toasts.css";
+import "./styles/update-toasts.css";
 import "./styles/composer.css";
 import "./styles/diff.css";
 import "./styles/diff-viewer.css";
@@ -15,6 +16,7 @@ import "./styles/plan.css";
 import "./styles/about.css";
 import "./styles/tabbar.css";
 import "./styles/worktree-modal.css";
+import "./styles/settings.css";
 import "./styles/compact-base.css";
 import "./styles/compact-phone.css";
 import "./styles/compact-tablet.css";
@@ -24,6 +26,7 @@ import { Home } from "./components/Home";
 import { MainHeader } from "./components/MainHeader";
 import { Messages } from "./components/Messages";
 import { ApprovalToasts } from "./components/ApprovalToasts";
+import { UpdateToast } from "./components/UpdateToast";
 import { Composer } from "./components/Composer";
 import { GitDiffPanel } from "./components/GitDiffPanel";
 import { GitDiffViewer } from "./components/GitDiffViewer";
@@ -32,7 +35,8 @@ import { PlanPanel } from "./components/PlanPanel";
 import { AboutView } from "./components/AboutView";
 import { TabBar } from "./components/TabBar";
 import { TabletNav } from "./components/TabletNav";
-import { ArrowLeft, TerminalSquare } from "lucide-react";
+import { SettingsView } from "./components/SettingsView";
+import { ArrowLeft } from "lucide-react";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useThreads } from "./hooks/useThreads";
 import { useWindowDrag } from "./hooks/useWindowDrag";
@@ -49,6 +53,8 @@ import { useWorkspaceRefreshOnFocus } from "./hooks/useWorkspaceRefreshOnFocus";
 import { useWorkspaceRestore } from "./hooks/useWorkspaceRestore";
 import { useResizablePanels } from "./hooks/useResizablePanels";
 import { useLayoutMode } from "./hooks/useLayoutMode";
+import { useAppSettings } from "./hooks/useAppSettings";
+import { useUpdater } from "./hooks/useUpdater";
 import type { AccessMode, QueuedMessage, WorkspaceInfo } from "./types";
 
 function useWindowLabel() {
@@ -89,6 +95,11 @@ function MainApp() {
     Record<string, QueuedMessage[]>
   >({});
   const [prefillDraft, setPrefillDraft] = useState<QueuedMessage | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [reduceTransparency, setReduceTransparency] = useState(() => {
+    const stored = localStorage.getItem("reduceTransparency");
+    return stored === "true";
+  });
   const [flushingByThread, setFlushingByThread] = useState<Record<string, boolean>>(
     {},
   );
@@ -108,6 +119,10 @@ function MainApp() {
     clearDebugEntries,
   } = useDebugLog();
 
+  const updater = useUpdater({ onDebug: addDebugEntry });
+
+  const { settings: appSettings, saveSettings, doctor } = useAppSettings();
+
   const {
     workspaces,
     activeWorkspace,
@@ -118,11 +133,23 @@ function MainApp() {
     connectWorkspace,
     markWorkspaceConnected,
     updateWorkspaceSettings,
+    updateWorkspaceCodexBin,
     removeWorkspace,
     removeWorktree,
     hasLoaded,
     refreshWorkspaces,
-  } = useWorkspaces({ onDebug: addDebugEntry });
+  } = useWorkspaces({ onDebug: addDebugEntry, defaultCodexBin: appSettings.codexBin });
+
+  useEffect(() => {
+    setAccessMode((prev) =>
+      prev === "current" ? appSettings.defaultAccessMode : prev,
+    );
+  }, [appSettings.defaultAccessMode]);
+
+  useEffect(() => {
+    localStorage.setItem("reduceTransparency", String(reduceTransparency));
+  }, [reduceTransparency]);
+
 
   const { status: gitStatus, refresh: refreshGitStatus } =
     useGitStatus(activeWorkspace);
@@ -458,6 +485,45 @@ function MainApp() {
     }
     setDebugOpen((prev) => !prev);
   };
+  const handleOpenSettings = () => setSettingsOpen(true);
+
+  const orderValue = (entry: WorkspaceInfo) =>
+    typeof entry.settings.sortOrder === "number"
+      ? entry.settings.sortOrder
+      : Number.MAX_SAFE_INTEGER;
+
+  const handleMoveWorkspace = async (workspaceId: string, direction: "up" | "down") => {
+    const ordered = workspaces
+      .filter((entry) => (entry.kind ?? "main") !== "worktree")
+      .slice()
+      .sort((a, b) => {
+        const orderDiff = orderValue(a) - orderValue(b);
+        if (orderDiff !== 0) {
+          return orderDiff;
+        }
+        return a.name.localeCompare(b.name);
+      });
+    const index = ordered.findIndex((entry) => entry.id === workspaceId);
+    if (index === -1) {
+      return;
+    }
+    const nextIndex = direction === "up" ? index - 1 : index + 1;
+    if (nextIndex < 0 || nextIndex >= ordered.length) {
+      return;
+    }
+    const next = ordered.slice();
+    const temp = next[index];
+    next[index] = next[nextIndex];
+    next[nextIndex] = temp;
+    await Promise.all(
+      next.map((entry, idx) =>
+        updateWorkspaceSettings(entry.id, {
+          ...entry.settings,
+          sortOrder: idx,
+        }),
+      ),
+    );
+  };
 
   const showComposer = !isCompact
     ? centerMode === "chat"
@@ -465,18 +531,21 @@ function MainApp() {
   const showGitDetail = Boolean(selectedDiffPath) && isPhone;
   const appClassName = `app ${isCompact ? "layout-compact" : "layout-desktop"}${
     isPhone ? " layout-phone" : ""
-  }${isTablet ? " layout-tablet" : ""}`;
+  }${isTablet ? " layout-tablet" : ""}${reduceTransparency ? " reduced-transparency" : ""}`;
 
   const sidebarNode = (
-    <Sidebar
-      workspaces={workspaces}
-      threadsByWorkspace={threadsByWorkspace}
-      threadStatusById={threadStatusById}
-      threadListLoadingByWorkspace={threadListLoadingByWorkspace}
-      activeWorkspaceId={activeWorkspaceId}
-      activeThreadId={activeThreadId}
-      accountRateLimits={activeRateLimits}
-      onAddWorkspace={handleAddWorkspace}
+      <Sidebar
+        workspaces={workspaces}
+        threadsByWorkspace={threadsByWorkspace}
+        threadStatusById={threadStatusById}
+        threadListLoadingByWorkspace={threadListLoadingByWorkspace}
+        activeWorkspaceId={activeWorkspaceId}
+        activeThreadId={activeThreadId}
+        accountRateLimits={activeRateLimits}
+        onOpenSettings={handleOpenSettings}
+        onOpenDebug={handleDebugClick}
+        hasDebugAlerts={hasDebugAlerts}
+        onAddWorkspace={handleAddWorkspace}
       onSelectHome={() => {
         exitDiffView();
         setActiveWorkspaceId(null);
@@ -585,12 +654,6 @@ function MainApp() {
     />
   ) : null;
 
-  const debugButton = hasDebugAlerts ? (
-    <button className="ghost icon-button" onClick={handleDebugClick} aria-label="Log">
-      <TerminalSquare aria-hidden />
-    </button>
-  ) : null;
-
   const desktopLayout = (
     <>
       {sidebarNode}
@@ -603,6 +666,11 @@ function MainApp() {
       />
 
       <section className="main">
+        <UpdateToast
+          state={updater.state}
+          onUpdate={updater.startUpdate}
+          onDismiss={updater.dismiss}
+        />
         {showHome && (
           <Home
             onOpenProject={handleAddWorkspace}
@@ -641,7 +709,7 @@ function MainApp() {
                 />
               </div>
               <div className="actions">
-                {debugButton}
+                {null}
               </div>
             </div>
             <ApprovalToasts
@@ -649,7 +717,6 @@ function MainApp() {
               workspaces={workspaces}
               onDecision={handleApprovalDecision}
             />
-
             <div className="content">
               {centerMode === "diff" ? (
                 <GitDiffViewer
@@ -732,6 +799,11 @@ function MainApp() {
           workspaces={workspaces}
           onDecision={handleApprovalDecision}
         />
+        <UpdateToast
+          state={updater.state}
+          onUpdate={updater.startUpdate}
+          onDismiss={updater.dismiss}
+        />
         {showHome && (
           <Home
             onOpenProject={handleAddWorkspace}
@@ -756,9 +828,7 @@ function MainApp() {
                   onCreateBranch={handleCreateBranch}
                 />
               </div>
-              <div className="actions">
-                {debugButton}
-              </div>
+              <div className="actions" />
             </div>
             {tabletTab === "codex" && (
               <>
@@ -819,6 +889,11 @@ function MainApp() {
         workspaces={workspaces}
         onDecision={handleApprovalDecision}
       />
+      <UpdateToast
+        state={updater.state}
+        onUpdate={updater.startUpdate}
+        onDismiss={updater.dismiss}
+      />
       {activeTab === "projects" && <div className="compact-panel">{sidebarNode}</div>}
       {activeTab === "codex" && (
         <div className="compact-panel">
@@ -839,9 +914,7 @@ function MainApp() {
                   onCreateBranch={handleCreateBranch}
                 />
                 </div>
-                <div className="actions">
-                  {debugButton}
-                </div>
+                <div className="actions" />
               </div>
               <div className="content compact-content">
                 {messagesNode}
@@ -987,6 +1060,26 @@ function MainApp() {
           }
           onCancel={() => setWorktreePrompt(null)}
           onConfirm={handleConfirmWorktreePrompt}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsView
+          workspaces={workspaces}
+          onClose={() => setSettingsOpen(false)}
+          onMoveWorkspace={handleMoveWorkspace}
+          onDeleteWorkspace={(workspaceId) => {
+            void removeWorkspace(workspaceId);
+          }}
+          reduceTransparency={reduceTransparency}
+          onToggleTransparency={setReduceTransparency}
+          appSettings={appSettings}
+          onUpdateAppSettings={async (next) => {
+            await saveSettings(next);
+          }}
+          onRunDoctor={doctor}
+          onUpdateWorkspaceCodexBin={async (id, codexBin) => {
+            await updateWorkspaceCodexBin(id, codexBin);
+          }}
         />
       )}
     </div>

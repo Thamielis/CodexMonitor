@@ -22,11 +22,18 @@ cat src-tauri/tauri.conf.json
 cat package.json
 ```
 
-Bump both to the release version before building.
+Bump both to the release version before building. After the release is published, bump both to the next minor.
 
-After the release is published, bump both to the next minor.
+## Build (Signed for Updater)
 
-## Build
+The updater requires signing artifacts during the build. Export the private key
+before `tauri build`:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY=~/.tauri/codexmonitor.key
+# optional if you set a password
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+```
 
 ```bash
 npm install
@@ -50,7 +57,13 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 
 ## Sign + Notarize + Staple (Human Step)
 
-1) Zip the app:
+1) Confirm signing identity (from Keychain):
+
+```bash
+security find-identity -v -p codesigning
+```
+
+2) Zip the app:
 
 ```bash
 ditto -c -k --keepParent \
@@ -58,7 +71,7 @@ ditto -c -k --keepParent \
   CodexMonitor.zip
 ```
 
-2) Store notary credentials (one-time per machine):
+3) Store notary credentials (one-time per machine):
 
 ```bash
 xcrun notarytool store-credentials codexmonitor-notary \
@@ -67,20 +80,19 @@ xcrun notarytool store-credentials codexmonitor-notary \
   --password "app-specific-password"
 ```
 
-If the profile already exists in Keychain, skip this step and reuse:
+If the profile already exists in Keychain, reuse it:
 
 ```bash
 --keychain-profile "codexmonitor-notary"
 ```
 
-If your `notarytool` build does not support listing profiles, validate the
-profile by running:
+Validate the profile (works even if listing is unsupported):
 
 ```bash
 xcrun notarytool history --keychain-profile "codexmonitor-notary"
 ```
 
-3) Submit for notarization and wait:
+4) Submit for notarization and wait:
 
 ```bash
 xcrun notarytool submit CodexMonitor.zip \
@@ -88,7 +100,7 @@ xcrun notarytool submit CodexMonitor.zip \
   --wait
 ```
 
-4) Staple the app:
+5) Staple the app:
 
 ```bash
 xcrun stapler staple \
@@ -117,18 +129,82 @@ hdiutil create -volname "CodexMonitor" \
   release-artifacts/CodexMonitor_<RELEASE_VERSION>_aarch64.dmg
 ```
 
-## GitHub Release (with gh)
+## Rebuild Updater Bundle (After Stapling)
+
+After stapling, rebuild the updater tarball and re-sign it so the signature
+matches the stapled app:
+
+```bash
+tar -czf src-tauri/target/release/bundle/macos/CodexMonitor.app.tar.gz \
+  -C src-tauri/target/release/bundle/macos CodexMonitor.app
+
+npm run tauri signer sign -- \
+  -f ~/.tauri/codexmonitor.key \
+  -p "<PASSWORD_IF_SET>" \
+  src-tauri/target/release/bundle/macos/CodexMonitor.app.tar.gz
+```
+
+## Generate Changelog (from git log)
+
+Create release notes from the tag range using plain git log:
+
+```bash
+git log --name-only --pretty=format:"%h %s" v<PREV_VERSION>..v<RELEASE_VERSION>
+```
+
+Summarize user-facing changes into short bullet points and use them in the GitHub release notes.
+
+## Tag, Release, and Updater Manifest (with gh)
+
+Tag first so the changelog is tied to the release tag:
 
 ```bash
 git tag v<RELEASE_VERSION>
 git push origin v<RELEASE_VERSION>
+```
 
+Create the GitHub release with artifacts:
+
+```bash
 gh release create v<RELEASE_VERSION> \
   --title "v<RELEASE_VERSION>" \
   --notes "Signed + notarized macOS release." \
   release-artifacts/CodexMonitor.zip \
   release-artifacts/CodexMonitor_<RELEASE_VERSION>_aarch64.dmg
 ```
+
+Generate `latest.json` for the Tauri updater and upload it alongside the
+signed artifacts. The updater manifest should include short notes and point at
+the released artifacts + signatures.
+
+```json
+{
+  "version": "<RELEASE_VERSION>",
+  "notes": "- Short update notes\n- Keep it brief",
+  "pub_date": "2025-01-01T12:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/Dimillian/CodexMonitor/releases/download/v<RELEASE_VERSION>/CodexMonitor.app.tar.gz",
+      "signature": "<BASE64_SIGNATURE>"
+    }
+  }
+}
+```
+
+Signatures are generated during the build and emitted as `.sig` files next to
+the bundles. Upload both the `.sig` files and `latest.json` to the same release:
+
+```bash
+gh release upload v<RELEASE_VERSION> \
+  release-artifacts/CodexMonitor.zip \
+  release-artifacts/CodexMonitor_<RELEASE_VERSION>_aarch64.dmg \
+  src-tauri/target/release/bundle/macos/CodexMonitor.app.tar.gz \
+  src-tauri/target/release/bundle/macos/CodexMonitor.app.tar.gz.sig \
+  latest.json \
+  --clobber
+```
+
+After uploading, edit the GitHub release notes to use the changelog summary.
 
 ## Notes
 
