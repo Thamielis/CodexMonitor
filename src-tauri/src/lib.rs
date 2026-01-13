@@ -394,50 +394,120 @@ fn write_workspaces(path: &PathBuf, entries: &[WorkspaceEntry]) -> Result<(), St
     std::fs::write(path, data).map_err(|e| e.to_string())
 }
 
-fn build_codex_command(entry: &WorkspaceEntry) -> Command {
-    let default_bin = entry
-        .codex_bin
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true);
-    let bin = entry
-        .codex_bin
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "codex".into());
-    let mut command = Command::new(bin);
-    if default_bin {
-        let mut paths: Vec<String> = env::var("PATH")
-            .unwrap_or_default()
-            .split(':')
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string())
-            .collect();
-        let mut extras = vec![
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<String>>();
-        if let Ok(home) = env::var("HOME") {
-            extras.push(format!("{home}/.local/bin"));
-            extras.push(format!("{home}/.cargo/bin"));
-        }
-        for extra in extras {
-            if !paths.contains(&extra) {
-                paths.push(extra);
-            }
-        }
-        if !paths.is_empty() {
-            command.env("PATH", paths.join(":"));
+
+#[cfg(target_os = "windows")]
+fn is_cmd_script(path_value: &PathBuf) -> bool {
+    path_value
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "cmd" || ext == "bat"
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn candidate_codex_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(path_value) = env::var_os("PATH") {
+        dirs.extend(env::split_paths(&path_value));
+    }
+
+    // npm global: %APPDATA%\npm (extrem häufig für *.cmd shims)
+    if let Some(app_data) = env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(app_data).join("npm"));
+    }
+
+    // user profile / cargo
+    if let Some(user_profile) = env::var_os("USERPROFILE") {
+        let home = PathBuf::from(user_profile);
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".local").join("bin"));
+    }
+
+    // WindowsApps (Store / App Installer)
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local_app_data).join("Microsoft").join("WindowsApps"));
+    }
+
+    // Node / Git typische Pfade (optional, aber hilfreich)
+    if let Some(program_files) = env::var_os("ProgramFiles") {
+        let pf = PathBuf::from(program_files);
+        dirs.push(pf.join("nodejs"));
+        dirs.push(pf.join("Git").join("cmd"));
+        dirs.push(pf.join("Git").join("bin"));
+    }
+    if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
+        let pf86 = PathBuf::from(program_files_x86);
+        dirs.push(pf86.join("Git").join("cmd"));
+        dirs.push(pf86.join("Git").join("bin"));
+    }
+
+    // Dedupe (ohne HashSet, weil PathBuf)
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        if !unique.iter().any(|existing| existing == &dir) {
+            unique.push(dir);
         }
     }
-    command
+
+    unique
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_codex_path() -> Option<PathBuf> {
+    let dirs = candidate_codex_dirs();
+
+    // zuerst exe, dann cmd/bat
+    let names = ["codex.exe", "codex.cmd", "codex.bat", "codex"];
+
+    for dir in dirs {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn build_codex_command(entry: &WorkspaceEntry) -> Command {
+    // Wenn User explizit einen Pfad gesetzt hat, den verwenden
+    let provided = entry
+        .codex_bin
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+
+    #[cfg(target_os = "windows")]
+    {
+        let codex_path = provided
+            .map(PathBuf::from)
+            .or_else(resolve_codex_path);
+
+        if let Some(codex_path) = codex_path {
+            // WICHTIG: *.cmd/*.bat über cmd.exe /C starten
+            if is_cmd_script(&codex_path) {
+                let mut cmd = Command::new("cmd.exe");
+                cmd.arg("/C").arg(codex_path);
+                return cmd;
+            }
+
+            return Command::new(codex_path);
+        }
+
+        // Fallback: versucht "codex" via PATH zu starten
+        return Command::new("codex");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let Bin = Provided.unwrap_or_else(|| "codex".into());
+        Command::new(Bin)
+    }
 }
 
 async fn check_codex_installation(entry: &WorkspaceEntry) -> Result<Option<String>, String> {
